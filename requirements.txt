@@ -1,0 +1,13 @@
+# huggingface
+transformers==4.38.2
+datasets
+accelerate
+
+# ML basic 
+torch
+torchvision
+scikit-learn
+sentencepiece
+
+# others
+protobuf
