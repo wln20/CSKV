@@ -8,6 +8,8 @@ from collections import OrderedDict
 from transformers.cache_utils import DynamicCache
 from svdkv_src.modeling.modeling_llama import (
     LlamaAttentionForSVDKV,
+    LlamaFlashAttention2ForSVDKV,
+    LlamaSdpaAttentionForSVDKV,
     LlamaAttentionForSVDKVTrain,
     forward_llama,
     forward_llama_model,
@@ -52,10 +54,17 @@ def get_svdkv_model(model, args):
         model.prepare_inputs_for_generation = MethodType(prepare_inputs_for_generation_llama, model)
         model.model.forward = MethodType(forward_llama_model, model.model)
         
+        # define the attention implementation method
+        LLAMA_ATTENTION_CLASSES = {
+            "eager": LlamaAttentionForSVDKV,
+            "flash_attention_2": LlamaFlashAttention2ForSVDKV,
+            "sdpa": LlamaSdpaAttentionForSVDKV,
+        }
+        
         # replace attention modules
         for i in tqdm(range(len(model.model.layers))):
             block = model.model.layers[i]
-            new_attn = LlamaAttentionForSVDKV(model.config, block.self_attn.layer_idx, args).to(block.self_attn.q_proj.weight.dtype).to(block.self_attn.q_proj.weight.device)
+            new_attn = LLAMA_ATTENTION_CLASSES[args.attn_impl](model.config, block.self_attn.layer_idx, args).to(block.self_attn.q_proj.weight.dtype).to(block.self_attn.q_proj.weight.device)
             new_attn_state_dict = block.self_attn.state_dict().copy()  # odict_keys(['q_proj.weight', 'k_proj.weight', 'v_proj.weight', 'o_proj.weight'])
             if args.use_asvd:
                 if args.use_init_params:

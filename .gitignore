@@ -162,6 +162,7 @@ cython_debug/
 #.idea/
 
 # custom
+.vscode
 asvd_data
 kvcache_compressor_checkpoints
 tmp_trainer

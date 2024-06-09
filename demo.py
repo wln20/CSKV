@@ -18,6 +18,9 @@ parser.add_argument('--model_id', default='longchat-7b-v1.5-32k', help='the name
 
 parser.add_argument('--logging_level', type=str, default='DEBUG', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
 
+# attention implementation
+parser.add_argument("--attn_impl", default='eager', choices=['eager', 'flash_attention_2', 'sdpa'])
+
 # compression ratio
 parser.add_argument('--k_compressed_dim', type=int, default=32)
 parser.add_argument('--v_compressed_dim', type=int, default=96)
@@ -55,6 +58,7 @@ if __name__ == "__main__":
     # set config
     config = AutoConfig.from_pretrained(args.model_path)
     config.max_position_embeddings = 32768
+    config._attn_implementation = args.attn_impl  
     kwargs = {"torch_dtype": torch.float16, "device_map": "auto"}
 
     model = AutoModelForCausalLM.from_pretrained(args.model_path, config=config, **kwargs)

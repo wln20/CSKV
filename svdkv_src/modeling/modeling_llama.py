@@ -33,8 +33,10 @@ from transformers.models.llama.modeling_llama import (
     CausalLMOutputWithPast
 )
 
-# from flash_attn import flash_attn_func, flash_attn_varlen_func
-# from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+from transformers.utils import is_flash_attn_2_available
+if is_flash_attn_2_available():
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
 from svdkv_src.utils.quant_utils import KVQuantizer, KVQuantizerChannel
 from svdkv_src.utils.cache_utils import DynamicCacheWithWindow
@@ -440,218 +442,198 @@ class LlamaAttentionForSVDKV(nn.Module):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
-
-        if self.config.pretraining_tp > 1:
-            raise NotImplementedError("`pretraining_tp` > 1 has not been `supported yet")
-            # key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            # query_slices = self.q_proj.weight.split(
-            #     (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            # )
-            # key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            # value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-            # query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            # query_states = torch.cat(query_states, dim=-1)
-
-            # key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            # key_states = torch.cat(key_states, dim=-1)
-
-            # value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            # value_states = torch.cat(value_states, dim=-1)
-
-        else:
-            query_states = self.q_proj(hidden_states)
-            
-            if self.use_window:
-                if hidden_states.shape[1] > 1: # prefilling stage
-                    num_windows = hidden_states.shape[1] // self.q_window_size
-                    
-                    key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
-                    key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
-                    key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
-                    # full windows
-                    key_states_compressed_full = key_states_compressed[:, : num_windows * self.q_window_size, :]
-                    # residual
-                    key_states_compressed_res = key_states_compressed[:, num_windows * self.q_window_size:, :]
-                    key_states_origin_res = key_states_origin[:, num_windows * self.q_window_size:, :]
-                    del key_states  
-                    del key_states_compressed          
-                    
-                    value_states = self.v_proj_a(hidden_states) 
-                    value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
-                    value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]
-                    # full windows   
-                    value_states_compressed_full = value_states_compressed[:, : num_windows * self.q_window_size, :]
-                    # residual
-                    value_states_compressed_res = value_states_compressed[:, num_windows * self.q_window_size:, :]
-                    value_states_origin_res = value_states_origin[:, num_windows * self.q_window_size:, :]
-                    del value_states     
-                    del value_states_compressed    
-                    
-                    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-                    
-                    key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
-                    key_states_compressed_full = key_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2) 
-                    key_states_compressed_res = key_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)   
-                    key_states_origin_res = key_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
-                    
-                    value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
-                    value_states_compressed_full = value_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
-                    value_states_compressed_res = value_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)
-                    value_states_origin_res = value_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+        query_states = self.q_proj(hidden_states)
         
-                    # quant compressed full window
-                    if self.k_bits < 16 and num_windows > 0:
-                        key_states_compressed_full = self.quantizer_k.apply(key_states_compressed_full, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
-                    if self.v_bits < 16 and num_windows > 0:
-                        value_states_compressed_full = self.quantizer_v.apply(value_states_compressed_full, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache
-                        
-                    # save kv cache (compressed+quant full window & compressed residual & origin residual)
-                    past_key_value = getattr(self, "past_key_value", past_key_value)
-                    if past_key_value is not None:
+        if self.use_window:
+            if hidden_states.shape[1] > 1: # prefilling stage
+                num_windows = hidden_states.shape[1] // self.q_window_size
+                
+                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+                # full windows
+                key_states_compressed_full = key_states_compressed[:, : num_windows * self.q_window_size, :]
+                # residual
+                key_states_compressed_res = key_states_compressed[:, num_windows * self.q_window_size:, :]
+                key_states_origin_res = key_states_origin[:, num_windows * self.q_window_size:, :]
+                del key_states  
+                del key_states_compressed          
+                
+                value_states = self.v_proj_a(hidden_states) 
+                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]
+                # full windows   
+                value_states_compressed_full = value_states_compressed[:, : num_windows * self.q_window_size, :]
+                # residual
+                value_states_compressed_res = value_states_compressed[:, num_windows * self.q_window_size:, :]
+                value_states_origin_res = value_states_origin[:, num_windows * self.q_window_size:, :]
+                del value_states     
+                del value_states_compressed    
+                
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                
+                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+                key_states_compressed_full = key_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2) 
+                key_states_compressed_res = key_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)   
+                key_states_origin_res = key_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                
+                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+                value_states_compressed_full = value_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+                value_states_compressed_res = value_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)
+                value_states_origin_res = value_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+    
+                # quant compressed full window
+                if self.k_bits < 16 and num_windows > 0:
+                    key_states_compressed_full = self.quantizer_k.apply(key_states_compressed_full, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
+                if self.v_bits < 16 and num_windows > 0:
+                    value_states_compressed_full = self.quantizer_v.apply(value_states_compressed_full, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache
+                    
+                # save kv cache (compressed+quant full window & compressed residual & origin residual)
+                past_key_value = getattr(self, "past_key_value", past_key_value)
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                    # no cache_kwargs is needed for DynamicCache, we just drop it
+                    cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    _, _ = past_key_value.update_compressed_quant(key_states_compressed_full, value_states_compressed_full, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head] 
+                    _, _ = past_key_value.update_compressed(key_states_compressed_res, value_states_compressed_res, self.layer_idx, cache_kwargs)
+                    _, _ = past_key_value.update_origin(key_states_origin_res, value_states_origin_res, self.layer_idx, cache_kwargs)
+
+                key_states_all, value_states_all = key_states_origin, value_states_origin   
+                
+            else:       # decoding stage
+                past_key_value = getattr(self, "past_key_value", past_key_value)
+                past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)   
+                
+                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+                del key_states  
+                    
+                value_states = self.v_proj_a(hidden_states) 
+                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]   
+                del value_states     
+                
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                
+                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+                key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  
+                
+                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+                value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+                
+                if past_key_value is not None: 
+                    if (past_len + 1) % self.q_window_size == 0:    # after adding the current token, it just fills a window           
                         # sin and cos are specific to RoPE models; position_ids needed for the static cache
                         # no cache_kwargs is needed for DynamicCache, we just drop it
                         cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
-                        _, _ = past_key_value.update_compressed_quant(key_states_compressed_full, value_states_compressed_full, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head] 
-                        _, _ = past_key_value.update_compressed(key_states_compressed_res, value_states_compressed_res, self.layer_idx, cache_kwargs)
-                        _, _ = past_key_value.update_origin(key_states_origin_res, value_states_origin_res, self.layer_idx, cache_kwargs)
-
-                    key_states_all, value_states_all = key_states_origin, value_states_origin   
-                    
-                else:       # decoding stage
-                    past_key_value = getattr(self, "past_key_value", past_key_value)
-                    past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)   
-                    
-                    key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
-                    key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
-                    key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
-                    del key_states  
-                     
-                    value_states = self.v_proj_a(hidden_states) 
-                    value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
-                    value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]   
-                    del value_states     
-                    
-                    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-                    
-                    key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
-                    key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  
-                    
-                    value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
-                    value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
-                    
-                    if past_key_value is not None: 
-                        if (past_len + 1) % self.q_window_size == 0:    # after adding the current token, it just fills a window           
-                            # sin and cos are specific to RoPE models; position_ids needed for the static cache
-                            # no cache_kwargs is needed for DynamicCache, we just drop it
-                            cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
-                            # firstly store the
-                            # store and get the current full window's original KV Cache
-                            key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
-                            # store and get the current full window's compressed KV Cache
-                            key_states_compressed_window, value_states_compressed_window = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
-                            # clear the original KV Cache in memory
-                            past_key_value.clear_origin(self.layer_idx)
-                            # quant the current full window
-                            if self.k_bits < 16:
-                                key_states_compressed_window = self.quantizer_k.apply(key_states_compressed_window, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
-                            if self.v_bits < 16:
-                                value_states_compressed_window = self.quantizer_v.apply(value_states_compressed_window, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache 
-                            # clear the compressed but un-quant KV Cache in memory
-                            past_key_value.clear_compressed(self.layer_idx)
-                            # store the quantized version of the current full window's KV Cache, and get all the full windows
-                            key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(key_states_compressed_window, value_states_compressed_window, self.layer_idx, cache_kwargs)
-                            
+                        # firstly store the
+                        # store and get the current full window's original KV Cache
+                        key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
+                        # store and get the current full window's compressed KV Cache
+                        key_states_compressed_window, value_states_compressed_window = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
+                        # clear the original KV Cache in memory
+                        past_key_value.clear_origin(self.layer_idx)
+                        # quant the current full window
+                        if self.k_bits < 16:
+                            key_states_compressed_window = self.quantizer_k.apply(key_states_compressed_window, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
+                        if self.v_bits < 16:
+                            value_states_compressed_window = self.quantizer_v.apply(value_states_compressed_window, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache 
+                        # clear the compressed but un-quant KV Cache in memory
+                        past_key_value.clear_compressed(self.layer_idx)
+                        # store the quantized version of the current full window's KV Cache, and get all the full windows
+                        key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(key_states_compressed_window, value_states_compressed_window, self.layer_idx, cache_kwargs)
+                        
+                        # reconstruct k-cache and v-cache 
+                        k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+                        key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                        # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+                        value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                        
+                        # replace the last window's reconstructed KV Cache with the full-precision one
+                        key_states_all[:, :, -self.q_window_size: ] = key_states_origin_window
+                        value_states_all[:, :, -self.q_window_size: ] = value_states_origin_window
+                        
+                    else:   # adding the current token doesn't fill a window
+                        # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                        # no cache_kwargs is needed for DynamicCache, we just drop it
+                        cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        # firstly store the
+                        # store the current token's original KV Cache, and get the current window's original KV Cache
+                        key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
+                        # store the current token's compressed KV Cache (without quant)
+                        _, _ = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
+                        
+                        # get the compressed+quant full windows' KV Cache
+                        key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(None, None, self.layer_idx, cache_kwargs)
+                        if key_states_compressed_all.shape[2] == 0:     # there haven't been any full windows in KV Cache
+                            key_states_all, value_states_all = key_states_origin_window, value_states_origin_window
+                        else:
                             # reconstruct k-cache and v-cache 
                             k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
                             key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
                             # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
                             value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
-                            
-                            # replace the last window's reconstructed KV Cache with the full-precision one
-                            key_states_all[:, :, -self.q_window_size: ] = key_states_origin_window
-                            value_states_all[:, :, -self.q_window_size: ] = value_states_origin_window
-                            
-                        else:   # adding the current token doesn't fill a window
-                            # sin and cos are specific to RoPE models; position_ids needed for the static cache
-                            # no cache_kwargs is needed for DynamicCache, we just drop it
-                            cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
-                            # firstly store the
-                            # store the current token's original KV Cache, and get the current window's original KV Cache
-                            key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
-                            # store the current token's compressed KV Cache (without quant)
-                            _, _ = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
-                            
-                            # get the compressed+quant full windows' KV Cache
-                            key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(None, None, self.layer_idx, cache_kwargs)
-                            if key_states_compressed_all.shape[2] == 0:     # there haven't been any full windows in KV Cache
-                                key_states_all, value_states_all = key_states_origin_window, value_states_origin_window
-                            else:
-                                # reconstruct k-cache and v-cache 
-                                k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
-                                key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
-                                # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
-                                value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
-                                    
-                                # concat the last window's original kv with the reconstructed full windows
-                                key_states_all = torch.cat((key_states_all, key_states_origin_window.to(key_states_all.device)), dim=2)
-                                value_states_all = torch.cat((value_states_all, value_states_origin_window.to(value_states_all.device)), dim=2)
-                                # # replace the last window's reconstructed KV Cache with the full-precision one
-                                # cur_window_len = key_states_origin_window.shape[2]
-                                # key_states_all[:, :, -cur_window_len: ] = key_states_origin_window
-                                # value_states_all[:, :, -cur_window_len: ] = value_states_origin_window
-                
-            else:   # do not use window
-                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
-                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
-                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
-                del key_states
+                                
+                            # concat the last window's original kv with the reconstructed full windows
+                            key_states_all = torch.cat((key_states_all, key_states_origin_window.to(key_states_all.device)), dim=2)
+                            value_states_all = torch.cat((value_states_all, value_states_origin_window.to(value_states_all.device)), dim=2)
+                            # # replace the last window's reconstructed KV Cache with the full-precision one
+                            # cur_window_len = key_states_origin_window.shape[2]
+                            # key_states_all[:, :, -cur_window_len: ] = key_states_origin_window
+                            # value_states_all[:, :, -cur_window_len: ] = value_states_origin_window
+            
+        else:   # do not use window
+            key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+            key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+            key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+            del key_states
 
-                value_states = self.v_proj_a(hidden_states) 
-                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
-                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]      
-                del value_states     
+            value_states = self.v_proj_a(hidden_states) 
+            value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+            value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]      
+            del value_states     
 
-                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-                
-                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
-                key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  # [bsz, q_len, k_compressed_dim] -> [bsz, num_heads, q_len, k_compressed_dim_per_head]
-                
-                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
-                value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+            key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  # [bsz, q_len, k_compressed_dim] -> [bsz, num_heads, q_len, k_compressed_dim_per_head]
+            
+            value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+            value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
 
-                # ================================ KV Cache quantization
-                if self.k_bits < 16:
-                    key_states_compressed = self.quantizer_k.apply(key_states_compressed, self.k_bits, self.q_window_size if self.use_window else self.k_compressed_dim_per_head)
-                if self.v_bits < 16:
-                    value_states_compressed = self.quantizer_v.apply(value_states_compressed, self.v_bits, self.v_compressed_dim_per_head)
-                # =================================================================
+            # ================================ KV Cache quantization
+            if self.k_bits < 16:
+                key_states_compressed = self.quantizer_k.apply(key_states_compressed, self.k_bits, self.q_window_size if self.use_window else self.k_compressed_dim_per_head)
+            if self.v_bits < 16:
+                value_states_compressed = self.quantizer_v.apply(value_states_compressed, self.v_bits, self.v_compressed_dim_per_head)
+            # =================================================================
 
-                # ======================= store and get the compressed kvcache (without RoPE)
-                past_key_value = getattr(self, "past_key_value", past_key_value)
-                past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)
-                if past_key_value is not None:
-                    # sin and cos are specific to RoPE models; position_ids needed for the static cache
-                    # no cache_kwargs is needed for DynamicCache, we just drop it
-                    cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
-                    key_states_compressed_all, value_states_compressed_all = past_key_value.update(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head]
-                
-                # =============================================================
+            # ======================= store and get the compressed kvcache (without RoPE)
+            past_key_value = getattr(self, "past_key_value", past_key_value)
+            past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)
+            if past_key_value is not None:
+                # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                # no cache_kwargs is needed for DynamicCache, we just drop it
+                cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states_compressed_all, value_states_compressed_all = past_key_value.update(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head]
+            
+            # =============================================================
 
-                # =================== reconstruct k-cache and v-cache 
-                k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
-                key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
-                # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
-                value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
-                # ==================================================
+            # =================== reconstruct k-cache and v-cache 
+            k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+            key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+            # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+            value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+            # ==================================================
 
-                # ================================== replace the last token's reconstructed kvcache with the full-precision one
-                if past_len == 0:    # prefill
-                    key_states_all, value_states_all = key_states_origin, value_states_origin
-                else:   # decode, replace the last token's kvcache with the original key or value cache
-                    assert key_states_origin.shape[2] == 1
-                    key_states_all[:, :, -1] = key_states_origin[: , :, 0]
-                    value_states_all[:, :, -1] = value_states_origin[: , :, 0]
+            # ================================== replace the last token's reconstructed kvcache with the full-precision one
+            if past_len == 0:    # prefill
+                key_states_all, value_states_all = key_states_origin, value_states_origin
+            else:   # decode, replace the last token's kvcache with the original key or value cache
+                assert key_states_origin.shape[2] == 1
+                key_states_all[:, :, -1] = key_states_origin[: , :, 0]
+                value_states_all[:, :, -1] = value_states_origin[: , :, 0]
 
 
 
@@ -705,7 +687,679 @@ class LlamaAttentionForSVDKV(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
+class LlamaFlashAttention2ForSVDKV(LlamaAttentionForSVDKV):
+    """
+    Llama flash attention module. This module inherits from `LlamaAttention` as the weights of the module stays
+    untouched. The only required change would be on the forward pass where it needs to correctly call the public API of
+    flash attention and deal with padding tokens in case the input contains any of them.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
+        # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
+        # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
+        self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        output_attentions = False
+
+        bsz, q_len, _ = hidden_states.size()
+
+
+
+        query_states = self.q_proj(hidden_states)
+        
+        if self.use_window:
+            if hidden_states.shape[1] > 1: # prefilling stage
+                num_windows = hidden_states.shape[1] // self.q_window_size
+                
+                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+                # full windows
+                key_states_compressed_full = key_states_compressed[:, : num_windows * self.q_window_size, :]
+                # residual
+                key_states_compressed_res = key_states_compressed[:, num_windows * self.q_window_size:, :]
+                key_states_origin_res = key_states_origin[:, num_windows * self.q_window_size:, :]
+                del key_states  
+                del key_states_compressed          
+                
+                value_states = self.v_proj_a(hidden_states) 
+                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]
+                # full windows   
+                value_states_compressed_full = value_states_compressed[:, : num_windows * self.q_window_size, :]
+                # residual
+                value_states_compressed_res = value_states_compressed[:, num_windows * self.q_window_size:, :]
+                value_states_origin_res = value_states_origin[:, num_windows * self.q_window_size:, :]
+                del value_states     
+                del value_states_compressed    
+                
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                
+                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+                key_states_compressed_full = key_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2) 
+                key_states_compressed_res = key_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)   
+                key_states_origin_res = key_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                
+                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+                value_states_compressed_full = value_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+                value_states_compressed_res = value_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)
+                value_states_origin_res = value_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+    
+                # quant compressed full window
+                if self.k_bits < 16 and num_windows > 0:
+                    key_states_compressed_full = self.quantizer_k.apply(key_states_compressed_full, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
+                if self.v_bits < 16 and num_windows > 0:
+                    value_states_compressed_full = self.quantizer_v.apply(value_states_compressed_full, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache
+                    
+                # save kv cache (compressed+quant full window & compressed residual & origin residual)
+                past_key_value = getattr(self, "past_key_value", past_key_value)
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                    # no cache_kwargs is needed for DynamicCache, we just drop it
+                    cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    _, _ = past_key_value.update_compressed_quant(key_states_compressed_full, value_states_compressed_full, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head] 
+                    _, _ = past_key_value.update_compressed(key_states_compressed_res, value_states_compressed_res, self.layer_idx, cache_kwargs)
+                    _, _ = past_key_value.update_origin(key_states_origin_res, value_states_origin_res, self.layer_idx, cache_kwargs)
+
+                key_states_all, value_states_all = key_states_origin, value_states_origin   
+                
+            else:       # decoding stage
+                past_key_value = getattr(self, "past_key_value", past_key_value)
+                past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)   
+                
+                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+                del key_states  
+                    
+                value_states = self.v_proj_a(hidden_states) 
+                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]   
+                del value_states     
+                
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                
+                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+                key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  
+                
+                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+                value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+                
+                if past_key_value is not None: 
+                    if (past_len + 1) % self.q_window_size == 0:    # after adding the current token, it just fills a window           
+                        # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                        # no cache_kwargs is needed for DynamicCache, we just drop it
+                        cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        # firstly store the
+                        # store and get the current full window's original KV Cache
+                        key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
+                        # store and get the current full window's compressed KV Cache
+                        key_states_compressed_window, value_states_compressed_window = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
+                        # clear the original KV Cache in memory
+                        past_key_value.clear_origin(self.layer_idx)
+                        # quant the current full window
+                        if self.k_bits < 16:
+                            key_states_compressed_window = self.quantizer_k.apply(key_states_compressed_window, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
+                        if self.v_bits < 16:
+                            value_states_compressed_window = self.quantizer_v.apply(value_states_compressed_window, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache 
+                        # clear the compressed but un-quant KV Cache in memory
+                        past_key_value.clear_compressed(self.layer_idx)
+                        # store the quantized version of the current full window's KV Cache, and get all the full windows
+                        key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(key_states_compressed_window, value_states_compressed_window, self.layer_idx, cache_kwargs)
+                        
+                        # reconstruct k-cache and v-cache 
+                        k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+                        key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                        # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+                        value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                        
+                        # replace the last window's reconstructed KV Cache with the full-precision one
+                        key_states_all[:, :, -self.q_window_size: ] = key_states_origin_window
+                        value_states_all[:, :, -self.q_window_size: ] = value_states_origin_window
+                        
+                    else:   # adding the current token doesn't fill a window
+                        # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                        # no cache_kwargs is needed for DynamicCache, we just drop it
+                        cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        # firstly store the
+                        # store the current token's original KV Cache, and get the current window's original KV Cache
+                        key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
+                        # store the current token's compressed KV Cache (without quant)
+                        _, _ = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
+                        
+                        # get the compressed+quant full windows' KV Cache
+                        key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(None, None, self.layer_idx, cache_kwargs)
+                        if key_states_compressed_all.shape[2] == 0:     # there haven't been any full windows in KV Cache
+                            key_states_all, value_states_all = key_states_origin_window, value_states_origin_window
+                        else:
+                            # reconstruct k-cache and v-cache 
+                            k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+                            key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                            # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+                            value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                                
+                            # concat the last window's original kv with the reconstructed full windows
+                            key_states_all = torch.cat((key_states_all, key_states_origin_window.to(key_states_all.device)), dim=2)
+                            value_states_all = torch.cat((value_states_all, value_states_origin_window.to(value_states_all.device)), dim=2)
+                            # # replace the last window's reconstructed KV Cache with the full-precision one
+                            # cur_window_len = key_states_origin_window.shape[2]
+                            # key_states_all[:, :, -cur_window_len: ] = key_states_origin_window
+                            # value_states_all[:, :, -cur_window_len: ] = value_states_origin_window
+            
+        else:   # do not use window
+            key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+            key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+            key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+            del key_states
+
+            value_states = self.v_proj_a(hidden_states) 
+            value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+            value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]      
+            del value_states     
+
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+            key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  # [bsz, q_len, k_compressed_dim] -> [bsz, num_heads, q_len, k_compressed_dim_per_head]
+            
+            value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+            value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+
+            # ================================ KV Cache quantization
+            if self.k_bits < 16:
+                key_states_compressed = self.quantizer_k.apply(key_states_compressed, self.k_bits, self.q_window_size if self.use_window else self.k_compressed_dim_per_head)
+            if self.v_bits < 16:
+                value_states_compressed = self.quantizer_v.apply(value_states_compressed, self.v_bits, self.v_compressed_dim_per_head)
+            # =================================================================
+
+            # ======================= store and get the compressed kvcache (without RoPE)
+            past_key_value = getattr(self, "past_key_value", past_key_value)
+            past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)
+            if past_key_value is not None:
+                # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                # no cache_kwargs is needed for DynamicCache, we just drop it
+                cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states_compressed_all, value_states_compressed_all = past_key_value.update(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head]
+            
+            # =============================================================
+
+            # =================== reconstruct k-cache and v-cache 
+            k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+            key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+            # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+            value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+            # ==================================================
+
+            # ================================== replace the last token's reconstructed kvcache with the full-precision one
+            if past_len == 0:    # prefill
+                key_states_all, value_states_all = key_states_origin, value_states_origin
+            else:   # decode, replace the last token's kvcache with the original key or value cache
+                assert key_states_origin.shape[2] == 1
+                key_states_all[:, :, -1] = key_states_origin[: , :, 0]
+                value_states_all[:, :, -1] = value_states_origin[: , :, 0]
+
+
+
+        # ===================== get the RoPE for the compressed kvcache 
+        # note: because the stored kcache in past_key_value has not been positional embeded, 
+        # so all the past kcache should be positional embeded here.
+        if position_ids.shape[1] == 1:  # decode stage, original position_id would be like `[[275]]`, we want it to be like `[[0,1,...,275]]`
+            position_ids_all = torch.tensor([list(range(position_ids[0][0]+1)) for _ in range(position_ids.shape[0])]).to(position_ids.dtype).to(position_ids.device)
+        else:   # prefill stage
+            position_ids_all = position_ids
+            
+        cos_q, sin_q = self.rotary_emb(value_states_all, position_ids)  # q is not affected
+        cos_k, sin_k = self.rotary_emb(value_states_all, position_ids_all)
+        query_states, _ = apply_rotary_pos_emb(query_states, query_states, cos_q, sin_q)
+        key_states_all, _ = apply_rotary_pos_emb(key_states_all, key_states_all, cos_k, sin_k)
+        # ============================================================================
+
+        key_states_all = repeat_kv(key_states_all, self.num_key_value_groups)
+        value_states_all = repeat_kv(value_states_all, self.num_key_value_groups)
+
+        # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+        # to be able to avoid many of these transpose/reshape/view.
+        query_states = query_states.transpose(1, 2)
+        key_states_all = key_states_all.transpose(1, 2)
+        value_states_all = value_states_all.transpose(1, 2)
+
+        dropout_rate = self.attention_dropout if self.training else 0.0
+
+        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
+        # therefore the input hidden states gets silently casted in float32. Hence, we need
+        # cast them back in the correct dtype just to be sure everything works as expected.
+        # This might slowdown training & inference so it is recommended to not cast the LayerNorms
+        # in fp32. (LlamaRMSNorm handles it correctly)
+
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            # Handle the case where the model is quantized
+            elif hasattr(self.config, "_pre_quantization_dtype"):
+                target_dtype = self.config._pre_quantization_dtype
+            else:
+                target_dtype = self.q_proj.weight.dtype
+
+            logging.warn(
+                f"The input hidden states seems to be silently casted in float32, this might be related to"
+                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
+                f" {target_dtype}."
+            )
+
+            query_states = query_states.to(target_dtype)
+            key_states_all = key_states_all.to(target_dtype)
+            value_states_all = value_states_all.to(target_dtype)
+
+        attn_output = self._flash_attention_forward(
+            query_states, key_states_all, value_states_all, attention_mask, q_len, dropout=dropout_rate
+        )
+
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+        attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights, past_key_value
+
+    def _flash_attention_forward(
+        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+    ):
+        """
+        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
+        first unpad the input, then computes the attention scores and pad the final attention scores.
+
+        Args:
+            query_states (`torch.Tensor`):
+                Input query states to be passed to Flash Attention API
+            key_states (`torch.Tensor`):
+                Input key states to be passed to Flash Attention API
+            value_states (`torch.Tensor`):
+                Input value states to be passed to Flash Attention API
+            attention_mask (`torch.Tensor`):
+                The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
+                position of padding tokens and 1 for the position of non-padding tokens.
+            dropout (`int`, *optional*):
+                Attention dropout
+            softmax_scale (`float`, *optional*):
+                The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
+        """
+        if not self._flash_attn_uses_top_left_mask:
+            causal = self.is_causal
+        else:
+            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in LlamaFlashAttention2 __init__.
+            causal = self.is_causal and query_length != 1
+
+        # Contains at least one padding token in the sequence
+        if attention_mask is not None:
+            batch_size = query_states.shape[0]
+            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
+                query_states, key_states, value_states, attention_mask, query_length
+            )
+
+            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+            max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
+
+            attn_output_unpad = flash_attn_varlen_func(
+                query_states,
+                key_states,
+                value_states,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_in_batch_q,
+                max_seqlen_k=max_seqlen_in_batch_k,
+                dropout_p=dropout,
+                softmax_scale=softmax_scale,
+                causal=causal,
+            )
+
+            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+        else:
+            attn_output = flash_attn_func(
+                query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal
+            )
+
+        return attn_output
+
+    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+        batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
+
+        key_layer = index_first_axis(
+            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+        )
+        value_layer = index_first_axis(
+            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+        )
+        if query_length == kv_seq_len:
+            query_layer = index_first_axis(
+                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
+            )
+            cu_seqlens_q = cu_seqlens_k
+            max_seqlen_in_batch_q = max_seqlen_in_batch_k
+            indices_q = indices_k
+        elif query_length == 1:
+            max_seqlen_in_batch_q = 1
+            cu_seqlens_q = torch.arange(
+                batch_size + 1, dtype=torch.int32, device=query_layer.device
+            )  # There is a memcpy here, that is very bad.
+            indices_q = cu_seqlens_q[:-1]
+            query_layer = query_layer.squeeze(1)
+        else:
+            # The -q_len: slice assumes left padding.
+            attention_mask = attention_mask[:, -query_length:]
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+
+        return (
+            query_layer,
+            key_layer,
+            value_layer,
+            indices_q,
+            (cu_seqlens_q, cu_seqlens_k),
+            (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
+        )
+
+class LlamaSdpaAttentionForSVDKV(LlamaAttentionForSVDKV):
+    """
+    Llama attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
+    `LlamaAttention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
+    SDPA API.
+    """
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if output_attentions:
+            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
+            logging.warn(
+                "LlamaModel is using LlamaSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
+                'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
+            return super().forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
+        
+        bsz, q_len, _ = hidden_states.size()
+        query_states = self.q_proj(hidden_states)
+        
+        if self.use_window:
+            if hidden_states.shape[1] > 1: # prefilling stage
+                num_windows = hidden_states.shape[1] // self.q_window_size
+                
+                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+                # full windows
+                key_states_compressed_full = key_states_compressed[:, : num_windows * self.q_window_size, :]
+                # residual
+                key_states_compressed_res = key_states_compressed[:, num_windows * self.q_window_size:, :]
+                key_states_origin_res = key_states_origin[:, num_windows * self.q_window_size:, :]
+                del key_states  
+                del key_states_compressed          
+                
+                value_states = self.v_proj_a(hidden_states) 
+                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]
+                # full windows   
+                value_states_compressed_full = value_states_compressed[:, : num_windows * self.q_window_size, :]
+                # residual
+                value_states_compressed_res = value_states_compressed[:, num_windows * self.q_window_size:, :]
+                value_states_origin_res = value_states_origin[:, num_windows * self.q_window_size:, :]
+                del value_states     
+                del value_states_compressed    
+                
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                
+                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+                key_states_compressed_full = key_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2) 
+                key_states_compressed_res = key_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)   
+                key_states_origin_res = key_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                
+                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+                value_states_compressed_full = value_states_compressed_full.view(bsz, num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+                value_states_compressed_res = value_states_compressed_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)
+                value_states_origin_res = value_states_origin_res.view(bsz, q_len - num_windows * self.q_window_size, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+    
+                # quant compressed full window
+                if self.k_bits < 16 and num_windows > 0:
+                    key_states_compressed_full = self.quantizer_k.apply(key_states_compressed_full, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
+                if self.v_bits < 16 and num_windows > 0:
+                    value_states_compressed_full = self.quantizer_v.apply(value_states_compressed_full, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache
+                    
+                # save kv cache (compressed+quant full window & compressed residual & origin residual)
+                past_key_value = getattr(self, "past_key_value", past_key_value)
+                if past_key_value is not None:
+                    # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                    # no cache_kwargs is needed for DynamicCache, we just drop it
+                    cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    _, _ = past_key_value.update_compressed_quant(key_states_compressed_full, value_states_compressed_full, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head] 
+                    _, _ = past_key_value.update_compressed(key_states_compressed_res, value_states_compressed_res, self.layer_idx, cache_kwargs)
+                    _, _ = past_key_value.update_origin(key_states_origin_res, value_states_origin_res, self.layer_idx, cache_kwargs)
+
+                key_states_all, value_states_all = key_states_origin, value_states_origin   
+                
+            else:       # decoding stage
+                past_key_value = getattr(self, "past_key_value", past_key_value)
+                past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)   
+                
+                key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+                key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+                key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+                del key_states  
+                    
+                value_states = self.v_proj_a(hidden_states) 
+                value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+                value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]   
+                del value_states     
+                
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                
+                key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+                key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  
+                
+                value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+                value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+                
+                if past_key_value is not None: 
+                    if (past_len + 1) % self.q_window_size == 0:    # after adding the current token, it just fills a window           
+                        # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                        # no cache_kwargs is needed for DynamicCache, we just drop it
+                        cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        # firstly store the
+                        # store and get the current full window's original KV Cache
+                        key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
+                        # store and get the current full window's compressed KV Cache
+                        key_states_compressed_window, value_states_compressed_window = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
+                        # clear the original KV Cache in memory
+                        past_key_value.clear_origin(self.layer_idx)
+                        # quant the current full window
+                        if self.k_bits < 16:
+                            key_states_compressed_window = self.quantizer_k.apply(key_states_compressed_window, self.k_bits, self.q_window_size)    # use per-channel quant for key cache
+                        if self.v_bits < 16:
+                            value_states_compressed_window = self.quantizer_v.apply(value_states_compressed_window, self.v_bits, self.v_compressed_dim_per_head)    # use per-token quant for value cache 
+                        # clear the compressed but un-quant KV Cache in memory
+                        past_key_value.clear_compressed(self.layer_idx)
+                        # store the quantized version of the current full window's KV Cache, and get all the full windows
+                        key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(key_states_compressed_window, value_states_compressed_window, self.layer_idx, cache_kwargs)
+                        
+                        # reconstruct k-cache and v-cache 
+                        k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+                        key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                        # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+                        value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                        
+                        # replace the last window's reconstructed KV Cache with the full-precision one
+                        key_states_all[:, :, -self.q_window_size: ] = key_states_origin_window
+                        value_states_all[:, :, -self.q_window_size: ] = value_states_origin_window
+                        
+                    else:   # adding the current token doesn't fill a window
+                        # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                        # no cache_kwargs is needed for DynamicCache, we just drop it
+                        cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        # firstly store the
+                        # store the current token's original KV Cache, and get the current window's original KV Cache
+                        key_states_origin_window, value_states_origin_window = past_key_value.update_origin(key_states_origin, value_states_origin, self.layer_idx, cache_kwargs)
+                        # store the current token's compressed KV Cache (without quant)
+                        _, _ = past_key_value.update_compressed(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)
+                        
+                        # get the compressed+quant full windows' KV Cache
+                        key_states_compressed_all, value_states_compressed_all = past_key_value.update_compressed_quant(None, None, self.layer_idx, cache_kwargs)
+                        if key_states_compressed_all.shape[2] == 0:     # there haven't been any full windows in KV Cache
+                            key_states_all, value_states_all = key_states_origin_window, value_states_origin_window
+                        else:
+                            # reconstruct k-cache and v-cache 
+                            k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+                            key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                            # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+                            value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+                                
+                            # concat the last window's original kv with the reconstructed full windows
+                            key_states_all = torch.cat((key_states_all, key_states_origin_window.to(key_states_all.device)), dim=2)
+                            value_states_all = torch.cat((value_states_all, value_states_origin_window.to(value_states_all.device)), dim=2)
+                            # # replace the last window's reconstructed KV Cache with the full-precision one
+                            # cur_window_len = key_states_origin_window.shape[2]
+                            # key_states_all[:, :, -cur_window_len: ] = key_states_origin_window
+                            # value_states_all[:, :, -cur_window_len: ] = value_states_origin_window
+            
+        else:   # do not use window
+            key_states = self.k_proj_a(hidden_states)   # [bsz, q_len, hidden_size] -> [bsz, q_len, k_origin_dim + k_compressed_dim]
+            key_states_origin = key_states[:, :, : self.num_key_value_heads * self.head_dim]  # [bsz, q_len, k_origin_dim]
+            key_states_compressed = key_states[:, :, self.num_key_value_heads * self.head_dim: ]  # [bsz, q_len, k_compressed_dim]
+            del key_states
+
+            value_states = self.v_proj_a(hidden_states) 
+            value_states_origin = value_states[:, :, : self.num_key_value_heads * self.head_dim]
+            value_states_compressed = value_states[:, :, self.num_key_value_heads * self.head_dim: ]      
+            del value_states     
+
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            key_states_origin = key_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  # [bsz, q_len, k_origin_dim] -> [bsz, num_heads, q_len, head_dim]
+            key_states_compressed = key_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.k_compressed_dim_per_head).transpose(1, 2)  # [bsz, q_len, k_compressed_dim] -> [bsz, num_heads, q_len, k_compressed_dim_per_head]
+            
+            value_states_origin = value_states_origin.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)  
+            value_states_compressed = value_states_compressed.view(bsz, q_len, self.num_key_value_heads, self.v_compressed_dim_per_head).transpose(1, 2)  
+
+            # ================================ KV Cache quantization
+            if self.k_bits < 16:
+                key_states_compressed = self.quantizer_k.apply(key_states_compressed, self.k_bits, self.q_window_size if self.use_window else self.k_compressed_dim_per_head)
+            if self.v_bits < 16:
+                value_states_compressed = self.quantizer_v.apply(value_states_compressed, self.v_bits, self.v_compressed_dim_per_head)
+            # =================================================================
+
+            # ======================= store and get the compressed kvcache (without RoPE)
+            past_key_value = getattr(self, "past_key_value", past_key_value)
+            past_len = past_key_value.get_seq_length(layer_idx=self.layer_idx)
+            if past_key_value is not None:
+                # sin and cos are specific to RoPE models; position_ids needed for the static cache
+                # no cache_kwargs is needed for DynamicCache, we just drop it
+                cache_kwargs = None # {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states_compressed_all, value_states_compressed_all = past_key_value.update(key_states_compressed, value_states_compressed, self.layer_idx, cache_kwargs)    # [bsz, num_heads, k_len, v_compressed_dim_per_head]
+            
+            # =============================================================
+
+            # =================== reconstruct k-cache and v-cache 
+            k_len, v_len = key_states_compressed_all.shape[2], value_states_compressed_all.shape[2]
+            key_states_all = self.k_proj_b(key_states_compressed_all.transpose(1, 2).reshape(bsz, k_len, self.k_compressed_dim)).view(bsz, k_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+            # [bsz, num_heads, k_len, k_compressed_dim_per_head] -> [bsz, k_len, k_compressed_dim] -> [bsz, k_len, num_heads * head_dim] -> [bsz, num_heads, k_len, head_dim]
+            value_states_all = self.v_proj_b(value_states_compressed_all.transpose(1, 2).reshape(bsz, v_len, self.v_compressed_dim)).view(bsz, v_len, self.num_key_value_heads, self.head_dim).transpose(1, 2) 
+            # ==================================================
+
+            # ================================== replace the last token's reconstructed kvcache with the full-precision one
+            if past_len == 0:    # prefill
+                key_states_all, value_states_all = key_states_origin, value_states_origin
+            else:   # decode, replace the last token's kvcache with the original key or value cache
+                assert key_states_origin.shape[2] == 1
+                key_states_all[:, :, -1] = key_states_origin[: , :, 0]
+                value_states_all[:, :, -1] = value_states_origin[: , :, 0]
+
+
+
+        # ===================== get the RoPE for the compressed kvcache 
+        # note: because the stored kcache in past_key_value has not been positional embeded, 
+        # so all the past kcache should be positional embeded here.
+        if position_ids.shape[1] == 1:  # decode stage, original position_id would be like `[[275]]`, we want it to be like `[[0,1,...,275]]`
+            position_ids_all = torch.tensor([list(range(position_ids[0][0]+1)) for _ in range(position_ids.shape[0])]).to(position_ids.dtype).to(position_ids.device)
+        else:   # prefill stage
+            position_ids_all = position_ids
+            
+        cos_q, sin_q = self.rotary_emb(value_states_all, position_ids)  # q is not affected
+        cos_k, sin_k = self.rotary_emb(value_states_all, position_ids_all)
+        query_states, _ = apply_rotary_pos_emb(query_states, query_states, cos_q, sin_q)
+        key_states_all, _ = apply_rotary_pos_emb(key_states_all, key_states_all, cos_k, sin_k)
+        # ============================================================================
+
+        key_states_all = repeat_kv(key_states_all, self.num_key_value_groups)
+        value_states_all = repeat_kv(value_states_all, self.num_key_value_groups)
+
+        causal_mask = attention_mask
+        causal_mask = attention_mask
+        if attention_mask is not None and cache_position is not None:
+            causal_mask = causal_mask[:, :, cache_position, : key_states_all.shape[-2]]
+
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # Reference: https://github.com/pytorch/pytorch/issues/112577.
+        if query_states.device.type == "cuda" and causal_mask is not None:
+            query_states = query_states.contiguous()
+            key_states_all = key_states_all.contiguous()
+            value_states_all = value_states_all.contiguous()
+
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states_all,
+            value_states_all,
+            attn_mask=causal_mask,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+        )
+
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
+
+
 # <<<<<<<<<<<<<<<<<<<<<< Channel Reduction for SVD + Parallel >>>>>>>>>>>>>>>>>>>>>>>
+
+
+
 
 # >>>>>>>>>>>>>>>>>>>>>> Channel Reduction for SVD + Parallel Train >>>>>>>>>>>>>>>>>>>>>>>>
 class LlamaAttentionForSVDKVTrain(nn.Module):
