@@ -9,5 +9,8 @@ torchvision
 scikit-learn
 sentencepiece
 
+# flash attention
+flash_attn
+
 # others
 protobuf
