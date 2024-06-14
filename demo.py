@@ -22,8 +22,8 @@ parser.add_argument('--logging_level', type=str, default='DEBUG', choices=['DEBU
 parser.add_argument("--attn_impl", default='eager', choices=['eager', 'flash_attention_2', 'sdpa'])
 
 # compression ratio
-parser.add_argument('--k_compressed_dim', type=int, default=32)
-parser.add_argument('--v_compressed_dim', type=int, default=96)
+parser.add_argument('--k_density', type=float, default=0.25, help=r'how much key cache remains after compression, e.g. 0.25 means 25% remains')
+parser.add_argument('--v_density', type=float, default=0.75, help=r'how much value cache remains after compression, e.g. 0.25 means 25% remains')
 
 # baseline, use original model
 parser.add_argument('--use_origin_model', action='store_true')
@@ -44,7 +44,7 @@ parser.add_argument('--v_bits', type=int, default=16)
 
 # window_based quantization
 parser.add_argument('--use_window', action='store_true')
-parser.add_argument('--q_window_size', default=32)
+parser.add_argument('--q_window_size', type=int, default=32)
 
 args = parser.parse_args()
 
@@ -67,10 +67,8 @@ if __name__ == "__main__":
 
     # get svdkv model
     if not args.use_origin_model:
-        logging.info(f"* K Compressed dim: {args.k_compressed_dim}")
-        logging.info(f"* V Compressed dim: {args.v_compressed_dim}")
         if args.use_init_params:
-            logging.warning("* Using initial parameters of kv compressor")
+            logging.warning("* Using original SVD approximated W^K and W^V, args.k_density and args.v_density are unused.")
         model = get_svdkv_model(model, args)
         
     else:
@@ -86,8 +84,8 @@ if __name__ == "__main__":
         long_text = "Passage: " + long_text['text'] + "\n\n" + "Question: " + long_text['question'] + "\n\n" + "Answer: "
             
     prompts = [
-        long_text,
-       # "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: Some people got on a bus at the terminal. At the first bus stop, half of the people got down and 4 more people got in. Then at the second bus stop, 6 people got down and 8 more got in. If there were a total of 25 people heading to the third stop, how many people got on the bus at the terminal? ASSISTANT: " # 38
+        #long_text,
+       "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: Some people got on a bus at the terminal. At the first bus stop, half of the people got down and 4 more people got in. Then at the second bus stop, 6 people got down and 8 more got in. If there were a total of 25 people heading to the third stop, how many people got on the bus at the terminal? ASSISTANT: " # 38
     ]
 
     # print(f'Prompts: {prompts}')

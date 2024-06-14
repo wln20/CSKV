@@ -167,3 +167,4 @@ asvd_data
 kvcache_compressor_checkpoints
 tmp_trainer
 run_*
+*profiling*

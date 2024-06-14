@@ -30,8 +30,8 @@ parser.add_argument('--max_seq_len', type=int, default=4992)
 parser.add_argument('--logging_level', type=str, default='DEBUG', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
 
 # compression ratio
-parser.add_argument('--k_compressed_dim', type=int, default=64)
-parser.add_argument('--v_compressed_dim', type=int, default=64)
+parser.add_argument('--k_density', type=float, default=0.25, help=r'how much key cache remains after compression, e.g. 0.25 means 25% remains')
+parser.add_argument('--v_density', type=float, default=0.75, help=r'how much value cache remains after compression, e.g. 0.25 means 25% remains')
 
 # training
 parser.add_argument('--training_dataset', default='pile_subset', choices=['wikitext2', 'pile_subset'])
@@ -50,7 +50,7 @@ parser.add_argument('--v_bits', type=int, default=16)
 
 # window_based quantization
 parser.add_argument('--use_window', action='store_true')
-parser.add_argument('--q_window_size', default=32)
+parser.add_argument('--q_window_size', type=int, default=32)
 
 args = parser.parse_args()
 

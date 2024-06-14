@@ -24,26 +24,34 @@ from svdkv_src.utils.training_utils import (
     init_asvd_parallel_inference
 )
 
-from svdkv_src.utils.general_utils import get_name
+from svdkv_src.utils.general_utils import get_name, check_params
 
 def get_svdkv_model(model, args):
     """
     for inference, would load trained checkpoints for inferencing
     """
 
-    logging.info(f"* Arguments: {args}")
+    logging.debug(f"* Arguments: {args}")
+    logging.info("Validating arguments ...")
+    check_params(args)
+    
     logging.info(f"Getting svdkv model for {args.model_id} ...")
-
-    # ckpt path
-    args.k_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_k.ckpt")
-    args.v_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_v.ckpt")
-
-    if args.use_asvd:
-        with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
-            asvd_calib_data_all = torch.load(f)
 
     # replace the original attention modules
     if 'llama' in model.config.architectures[0].lower() or 'vicuna' in model.config.architectures[0].lower() or 'longchat' in model.config.architectures[0].lower() or 'baichuan' in model.config.architectures[0].lower():
+        # ckpt path
+        args.k_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_k.ckpt")
+        args.v_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_v.ckpt")
+
+        if args.use_asvd:
+            with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
+                asvd_calib_data_all = torch.load(f)
+        
+        # determine k_compressed_dim and v_compressed_dim
+        head_dim_origin = model.model.layers[0].self_attn.head_dim
+        args.k_compressed_dim = int(args.k_density * head_dim_origin)
+        args.v_compressed_dim = int(args.v_density * head_dim_origin)
+        
         # replace the original model with the custom one
         model.model.use_window = args.use_window
         model.model.q_window_size = args.q_window_size
@@ -101,14 +109,22 @@ def get_svdkv_model(model, args):
 def get_svdkv_model_train(model, args):
 
     logging.debug(f"* Arguments: {args}")
+    logging.info("Validating arguments ...")
+    check_params(args)
+    
     logging.info(f"Getting svdkv model (train) for {args.model_id} ...")
-
-    if args.use_asvd:
-        with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
-            asvd_calib_data_all = torch.load(f)
 
     # replace the original attention modules
     if 'llama' in model.config.architectures[0].lower() or 'vicuna' in model.config.architectures[0].lower() or 'longchat' in model.config.architectures[0].lower() or 'baichuan' in model.config.architectures[0].lower():
+        if args.use_asvd:
+            with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
+                asvd_calib_data_all = torch.load(f)
+        
+        # determine k_compressed_dim and v_compressed_dim
+        head_dim_origin = model.model.layers[0].self_attn.head_dim
+        args.k_compressed_dim = int(args.k_density * head_dim_origin)
+        args.v_compressed_dim = int(args.v_density * head_dim_origin)
+        
         # replace the original model with the custom one
         model.model.use_window = args.use_window
         model.model.q_window_size = args.q_window_size

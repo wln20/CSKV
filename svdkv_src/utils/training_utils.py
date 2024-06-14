@@ -73,7 +73,7 @@ def init_asvd_parallel_inference(proj_weight, calib_data, compressed_dim_per_hea
     orig_dtype = proj_weight.dtype
     compressed_dim = compressed_dim_per_head * num_heads
     calib_data += 1e-6
-    calib_data = calib_data ** alpha
+    calib_data = (calib_data ** alpha).to(proj_weight.device)
     scaled_proj_weight = torch.diag(calib_data) @ proj_weight.T
     u, s, vt = svd(scaled_proj_weight.to(torch.float32), full_matrices=False)
     u = u[:, :compressed_dim]
