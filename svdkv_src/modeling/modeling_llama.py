@@ -363,7 +363,7 @@ class LlamaAttentionForSVDKV(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        assert self.num_key_value_groups == 1, "TODO: self.num_key_value_heads != self.num_heads"
+        # assert self.num_key_value_groups == 1, "TODO: self.num_key_value_heads != self.num_heads"
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
@@ -718,9 +718,6 @@ class LlamaFlashAttention2ForSVDKV(LlamaAttentionForSVDKV):
         output_attentions = False
 
         bsz, q_len, _ = hidden_states.size()
-
-
-
         query_states = self.q_proj(hidden_states)
         
         if self.use_window:
