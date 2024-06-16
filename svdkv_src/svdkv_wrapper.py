@@ -37,16 +37,16 @@ def get_svdkv_model(model, args):
     
     logging.info(f"Getting svdkv model for {args.model_id} ...")
 
-    # replace the original attention modules
-    if 'llama' in model.config.architectures[0].lower() or 'vicuna' in model.config.architectures[0].lower() or 'longchat' in model.config.architectures[0].lower() or 'baichuan' in model.config.architectures[0].lower():
-        # ckpt path
-        args.k_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_k.ckpt")
-        args.v_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_v.ckpt")
+    # ckpt path
+    args.k_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_k.ckpt")
+    args.v_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_v.ckpt")
+    
+    if args.use_asvd:
+        with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
+            asvd_calib_data_all = torch.load(f, map_location='cpu')   
 
-        if args.use_asvd:
-            with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
-                asvd_calib_data_all = torch.load(f)
-        
+    # replace the original attention modules
+    if 'llama' in model.config.architectures[0].lower() or 'vicuna' in model.config.architectures[0].lower() or 'longchat' in model.config.architectures[0].lower() or 'baichuan' in model.config.architectures[0].lower():                
         # determine k_compressed_dim and v_compressed_dim
         head_dim_origin = model.model.layers[0].self_attn.head_dim
         args.k_compressed_dim = int(args.k_density * head_dim_origin)
@@ -114,12 +114,12 @@ def get_svdkv_model_train(model, args):
     
     logging.info(f"Getting svdkv model (train) for {args.model_id} ...")
 
+    if args.use_asvd:
+        with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
+            asvd_calib_data_all = torch.load(f, map_location='cpu')
+
     # replace the original attention modules
-    if 'llama' in model.config.architectures[0].lower() or 'vicuna' in model.config.architectures[0].lower() or 'longchat' in model.config.architectures[0].lower() or 'baichuan' in model.config.architectures[0].lower():
-        if args.use_asvd:
-            with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
-                asvd_calib_data_all = torch.load(f)
-        
+    if 'llama' in model.config.architectures[0].lower() or 'vicuna' in model.config.architectures[0].lower() or 'longchat' in model.config.architectures[0].lower() or 'baichuan' in model.config.architectures[0].lower(): 
         # determine k_compressed_dim and v_compressed_dim
         head_dim_origin = model.model.layers[0].self_attn.head_dim
         args.k_compressed_dim = int(args.k_density * head_dim_origin)

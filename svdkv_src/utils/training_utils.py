@@ -32,7 +32,7 @@ def init_asvd(proj_weight, calib_data, compressed_dim_per_head, num_heads, alpha
     orig_dtype = proj_weight.dtype
     compressed_dim = compressed_dim_per_head * num_heads
     calib_data += 1e-6
-    calib_data = (calib_data ** alpha).to(orig_dtype)
+    calib_data = (calib_data ** alpha).to(orig_dtype).to(proj_weight.device)
     scaled_proj_weight = torch.diag(calib_data) @ proj_weight.T
     u, s, vt = svd(scaled_proj_weight.to(torch.float32), full_matrices=False)
     u = u[:, :compressed_dim]
@@ -171,7 +171,7 @@ class TrainerForSVDKV(Trainer):
         assert len(attention_ops) == model.config.num_hidden_layers
         loss_mse = 0.0
         for module in attention_ops:
-            loss_mse += (module.k_mse_loss + module.v_mse_loss)
+            loss_mse += (module.k_mse_loss.to(model.device) + module.v_mse_loss.to(model.device))
         
         loss = self.kvmse_lambda * loss_mse + (1.0 - self.kvmse_lambda) * loss
 

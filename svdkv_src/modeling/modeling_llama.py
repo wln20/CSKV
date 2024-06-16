@@ -211,7 +211,7 @@ def forward_llama(
         shift_labels = shift_labels.view(-1)
         # Enable model parallelism
         shift_labels = shift_labels.to(shift_logits.device)
-        loss = loss_fct(shift_logits, shift_labels)
+        loss = loss_fct(shift_logits, shift_labels).to(input_ids.device)
 
     if not return_dict:
         output = (logits,) + outputs[1:]
@@ -219,11 +219,12 @@ def forward_llama(
 
     return CausalLMOutputWithPast(
         loss=loss,
-        logits=logits,
+        logits=logits.to(input_ids.device),
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
     )
+    
 # change the type of DynamicCache
 def forward_llama_model(
     self,
