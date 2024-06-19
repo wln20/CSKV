@@ -97,7 +97,7 @@ def init_svd_parallel_inference_load_ckpt(proj_weight, compressor_weight_a, comp
             proj_b_weight, shape = [self.num_heads * compressed_dim, hidden_size].T
     """
 
-    proj_a_weight = torch.cat([proj_weight.T, compressor_weight_a.T], dim=1).T
+    proj_a_weight = torch.cat([proj_weight.T, compressor_weight_a.T.to(proj_weight.device)], dim=1).T
     proj_b_weight = compressor_weight_b
 
     return proj_a_weight, proj_b_weight
