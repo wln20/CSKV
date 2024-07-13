@@ -26,7 +26,7 @@ from svdkv_src.utils.general_utils import get_name
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_path', default='/share/datasets/public_models/lmsys_longchat-7b-v1.5-32k', help='path to the hf model')
 parser.add_argument('--model_id', default='longchat-7b-v1.5-32k', help='the name you give to the model')
-parser.add_argument('--max_seq_len', type=int, default=4992)
+parser.add_argument('--max_seq_len', type=int, default=1024)
 parser.add_argument('--logging_level', type=str, default='DEBUG', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
 
 # compression ratio

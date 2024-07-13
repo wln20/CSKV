@@ -13,13 +13,12 @@ from svdkv_src.svdkv_wrapper import (
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_path', default='/share/datasets/public_models/lmsys_longchat-7b-v1.5-32k', help='path to the hf model')
 parser.add_argument('--model_id', default='longchat-7b-v1.5-32k', help='the name you give to the model')
-# parser.add_argument('--model_path', default='/share/datasets/public_models/Llama-2-7b-chat-hf', help='path to the hf model')
-# parser.add_argument('--model_id', default='llama2-7b-chat', help='the name you give to the model')
+parser.add_argument('--max_seq_len', type=int, default=32768)
 
 parser.add_argument('--logging_level', type=str, default='DEBUG', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
 
 # attention implementation
-parser.add_argument("--attn_impl", default='eager', choices=['eager', 'flash_attention_2', 'sdpa'])
+parser.add_argument("--attn_impl", default='sdpa', choices=['eager', 'flash_attention_2', 'sdpa'])
 
 # compression ratio
 parser.add_argument('--k_density', type=float, default=0.25, help=r'how much key cache remains after compression, e.g. 0.25 means 25% remains')
@@ -57,7 +56,7 @@ if __name__ == "__main__":
     logging.info(f"* Loading model and tokenizer from {args.model_path} ...")
     # set config
     config = AutoConfig.from_pretrained(args.model_path)
-    config.max_position_embeddings = 32768
+    config.max_position_embeddings = args.max_seq_len
     config._attn_implementation = args.attn_impl  
     kwargs = {"torch_dtype": torch.float16, "device_map": "auto"}
 

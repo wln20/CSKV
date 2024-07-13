@@ -117,6 +117,11 @@ def save_kvcompressor_ckpt(model, ckpt_save_path, kv, args=None):
             block = model.model.layers[i]
             state_dict = (block.self_attn.k_proj_a.state_dict(), block.self_attn.k_proj_b.state_dict()) if kv == 'k' else (block.self_attn.v_proj_a.state_dict(), block.self_attn.v_proj_b.state_dict())
             state_dicts.append(state_dict)
+    elif 'mistral' in model.config.architectures[0].lower():
+        for i in tqdm(range(len(model.model.layers))):
+            block = model.model.layers[i]
+            state_dict = (block.self_attn.k_proj_a.state_dict(), block.self_attn.k_proj_b.state_dict()) if kv == 'k' else (block.self_attn.v_proj_a.state_dict(), block.self_attn.v_proj_b.state_dict())
+            state_dicts.append(state_dict)      
     else:
         raise NotImplementedError(f"Not support model architecture: {model.config.architectures[0]}")
 
