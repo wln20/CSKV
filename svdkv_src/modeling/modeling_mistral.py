@@ -35,8 +35,8 @@ if is_flash_attn_2_available():
 
 _CONFIG_FOR_DOC = "MistralConfig"
 
-from svdkv_src.utils.quant_utils import KVQuantizer, KVQuantizerChannel
-from svdkv_src.utils.cache_utils import DynamicCacheWithWindow
+from cskv_src.utils.quant_utils import KVQuantizer, KVQuantizerChannel
+from cskv_src.utils.cache_utils import DynamicCacheWithWindow
 
 def prepare_inputs_for_generation_mistral(
     self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
@@ -356,7 +356,7 @@ def forward_mistral_model(
     )
 
 
-class MistralAttentionForSVDKV(nn.Module):
+class MistralAttentionForCSKV(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
     and "Generating Long Sequences with Sparse Transformers".
@@ -675,7 +675,7 @@ class MistralAttentionForSVDKV(nn.Module):
         return attn_output, attn_weights, past_key_value
     
     
-class MistralSdpaAttentionForSVDKV(MistralAttentionForSVDKV):
+class MistralSdpaAttentionForCSKV(MistralAttentionForCSKV):
     """
     Mistral attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
     `MistralAttention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
@@ -944,7 +944,7 @@ class MistralSdpaAttentionForSVDKV(MistralAttentionForSVDKV):
     
 
 # >>>>>>>>>>>>>>>>>> Train >>>>>>>>>>>>>>>>>>>>>>>>>>
-class MistralAttentionForSVDKVTrain(nn.Module):
+class MistralAttentionForCSKVTrain(nn.Module):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
     and "Generating Long Sequences with Sparse Transformers".

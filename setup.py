@@ -7,9 +7,9 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup(
-    name="svd-kv",
+    name="cskv",
     version="0.1.0",
-    description="Core code for SVD-KV",
+    description="Core code for CSKV",
     author="Luning Wang",
     author_email="wangluning2@gmail.com",
     # url="https://github.com/XXX.git",

@@ -38,8 +38,8 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
-from svdkv_src.utils.quant_utils import KVQuantizer, KVQuantizerChannel
-from svdkv_src.utils.cache_utils import DynamicCacheWithWindow
+from cskv_src.utils.quant_utils import KVQuantizer, KVQuantizerChannel
+from cskv_src.utils.cache_utils import DynamicCacheWithWindow
 
 # >>>>>>>>>>>>>>>>>>>>>>> generation method for Window-Based KV Cache >>>>>>>>>>>>>>>>>>>>>>>>
 # make sure the generation keeps track of the correct token numbers
@@ -349,7 +349,7 @@ def forward_llama_model(
     
 
 # >>>>>>>>>>>>>>>>>>>>>> Channel Reduction for SVD + Parallel >>>>>>>>>>>>>>>>>>>>>>>>
-class LlamaAttentionForSVDKV(nn.Module):
+class LlamaAttentionForCSKV(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None, args=None):
@@ -694,7 +694,7 @@ class LlamaAttentionForSVDKV(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
-class LlamaFlashAttention2ForSVDKV(LlamaAttentionForSVDKV):
+class LlamaFlashAttention2ForCSKV(LlamaAttentionForCSKV):
     """
     Llama flash attention module. This module inherits from `LlamaAttention` as the weights of the module stays
     untouched. The only required change would be on the forward pass where it needs to correctly call the public API of
@@ -1078,7 +1078,7 @@ class LlamaFlashAttention2ForSVDKV(LlamaAttentionForSVDKV):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
-class LlamaSdpaAttentionForSVDKV(LlamaAttentionForSVDKV):
+class LlamaSdpaAttentionForCSKV(LlamaAttentionForCSKV):
     """
     Llama attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
     `LlamaAttention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
@@ -1365,7 +1365,7 @@ class LlamaSdpaAttentionForSVDKV(LlamaAttentionForSVDKV):
 
 
 # >>>>>>>>>>>>>>>>>>>>>> Channel Reduction for SVD + Parallel Train >>>>>>>>>>>>>>>>>>>>>>>>
-class LlamaAttentionForSVDKVTrain(nn.Module):
+class LlamaAttentionForCSKVTrain(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None, args=None):
@@ -1601,7 +1601,6 @@ class LlamaAttentionForSVDKVTrain(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 # <<<<<<<<<<<<<<<<<<<<<< Channel Reduction for SVD + Parallel Train <<<<<<<<<<<<<<<<<<<<<<<<
-
 
 
 

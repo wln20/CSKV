@@ -129,7 +129,7 @@ def save_kvcompressor_ckpt(model, ckpt_save_path, kv, args=None):
         torch.save(state_dicts, f)
     
 ### Trainers
-class TrainerForSVDKV(Trainer):
+class TrainerForCSKV(Trainer):
     def __init__(self, model, train_dataset, args, data_collator):
         super().__init__(model=model, train_dataset=train_dataset, args=args, data_collator=data_collator)
         self.kvmse_lambda = 1.0 # do not use language modeling loss

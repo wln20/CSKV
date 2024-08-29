@@ -5,8 +5,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, TextStreamer
 
 # self import
-from svdkv_src.svdkv_wrapper import (
-    get_svdkv_model
+from cskv_src.cskv_wrapper import (
+    get_cskv_model
 )
 
 # parse arguments
@@ -31,11 +31,11 @@ parser.add_argument('--use_origin_model', action='store_true')
 parser.add_argument('--use_init_params', action='store_true')
 
 # ckpt after fine-tuning
-parser.add_argument('--kv_ckpt_root_path', default='./svdkv_src/data/kvcache_compressor_checkpoints')
+parser.add_argument('--kv_ckpt_root_path', default='./cskv_src/data/kvcache_compressor_checkpoints')
 
 # svd config
 parser.add_argument('--use_asvd', action='store_true')
-parser.add_argument('--asvd_calib_root', default='./svdkv_src/data/asvd_data/asvd_init_ckpts')
+parser.add_argument('--asvd_calib_root', default='./cskv_src/data/asvd_data/asvd_init_ckpts')
 
 # quant config
 parser.add_argument('--k_bits', type=int, default=16)
@@ -64,11 +64,11 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # get svdkv model
+    # get cskv model
     if not args.use_origin_model:
         if args.use_init_params:
             logging.warning("* Using original SVD approximated W^K and W^V, args.k_density and args.v_density are unused.")
-        model = get_svdkv_model(model, args)
+        model = get_cskv_model(model, args)
         
     else:
         logging.warning("* Using original model as a baseline")
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     logging.info("Generatng ...")
     print('='*40)
 
-    with open("./svdkv_src/data/long_data/data_1.json", 'r') as f:
+    with open("./cskv_src/data/long_data/data_1.json", 'r') as f:
         import json
         long_text = json.load(f)
         long_text = "Passage: " + long_text['text'] + "\n\n" + "Question: " + long_text['question'] + "\n\n" + "Answer: "

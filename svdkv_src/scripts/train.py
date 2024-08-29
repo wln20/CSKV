@@ -16,11 +16,11 @@ from transformers import (
     DataCollatorForLanguageModeling
 )
 
-from svdkv_src.svdkv_wrapper import get_svdkv_model_train
-from svdkv_src.utils.training_utils import TrainerForSVDKV, save_kvcompressor_ckpt
+from cskv_src.cskv_wrapper import get_cskv_model_train
+from cskv_src.utils.training_utils import TrainerForCSKV, save_kvcompressor_ckpt
 
-from svdkv_src.utils.data_utils import get_dataset_for_trainer
-from svdkv_src.utils.general_utils import get_name
+from cskv_src.utils.data_utils import get_dataset_for_trainer
+from cskv_src.utils.general_utils import get_name
 
 # parse arguments
 parser = argparse.ArgumentParser()
@@ -78,8 +78,8 @@ if __name__ == '__main__':
     # preprocess dataset
     dataset = get_dataset_for_trainer(args.training_dataset, tokenizer, split='train', seqlen=args.max_seq_len)
 
-    # get svdkv channel reduction model
-    model = get_svdkv_model_train(model, args)
+    # get cskv channel reduction model
+    model = get_cskv_model_train(model, args)
 
     # set training arguments
     training_args = TrainingArguments(
@@ -98,7 +98,7 @@ if __name__ == '__main__':
 
     logging.info("Start training ...")
     # set up trainer
-    trainer = TrainerForSVDKV(
+    trainer = TrainerForCSKV(
         model=model,
         train_dataset=dataset,
         args=training_args,

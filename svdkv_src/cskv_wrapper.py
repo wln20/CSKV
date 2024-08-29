@@ -6,26 +6,26 @@ from functools import partial
 from types import MethodType
 from collections import OrderedDict
 from transformers.cache_utils import DynamicCache
-from svdkv_src.modeling.modeling_llama import (
-    LlamaAttentionForSVDKV,
-    LlamaFlashAttention2ForSVDKV,
-    LlamaSdpaAttentionForSVDKV,
-    LlamaAttentionForSVDKVTrain,
+from cskv_src.modeling.modeling_llama import (
+    LlamaAttentionForCSKV,
+    LlamaFlashAttention2ForCSKV,
+    LlamaSdpaAttentionForCSKV,
+    LlamaAttentionForCSKVTrain,
     forward_llama,
     forward_llama_model,
     prepare_inputs_for_generation_llama,
 )
 
-from svdkv_src.modeling.modeling_mistral import(
-    MistralAttentionForSVDKV,
-    MistralSdpaAttentionForSVDKV,
-    MistralAttentionForSVDKVTrain,
+from cskv_src.modeling.modeling_mistral import(
+    MistralAttentionForCSKV,
+    MistralSdpaAttentionForCSKV,
+    MistralAttentionForCSKVTrain,
     forward_mistral,
     forward_mistral_model,
     prepare_inputs_for_generation_mistral
 )
 
-from svdkv_src.utils.training_utils import (
+from cskv_src.utils.training_utils import (
     init_svd_parallel_inference, 
     init_svd_parallel_inference_load_ckpt,
     init_svd,
@@ -33,9 +33,9 @@ from svdkv_src.utils.training_utils import (
     init_asvd_parallel_inference
 )
 
-from svdkv_src.utils.general_utils import get_name, check_params
+from cskv_src.utils.general_utils import get_name, check_params
 
-def get_svdkv_model(model, args):
+def get_cskv_model(model, args):
     """
     for inference, would load trained checkpoints for inferencing
     """
@@ -44,7 +44,7 @@ def get_svdkv_model(model, args):
     logging.info("Validating arguments ...")
     check_params(args)
     
-    logging.info(f"Getting svdkv model for {args.model_id} ...")
+    logging.info(f"Getting cskv model for {args.model_id} ...")
 
     # ckpt path
     args.k_compressor_ckpt = os.path.join(args.kv_ckpt_root_path, args.model_id, f"{get_name(args)}_k.ckpt")
@@ -73,9 +73,9 @@ def get_svdkv_model(model, args):
         
         # define the attention implementation method
         LLAMA_ATTENTION_CLASSES = {
-            "eager": LlamaAttentionForSVDKV,
-            "flash_attention_2": LlamaFlashAttention2ForSVDKV,
-            "sdpa": LlamaSdpaAttentionForSVDKV,
+            "eager": LlamaAttentionForCSKV,
+            "flash_attention_2": LlamaFlashAttention2ForCSKV,
+            "sdpa": LlamaSdpaAttentionForCSKV,
         }
         
         # replace attention modules
@@ -128,9 +128,9 @@ def get_svdkv_model(model, args):
         
         # define the attention implementation method
         MISTRAL_ATTENTION_CLASSES = {
-            "eager": MistralAttentionForSVDKV,
-            # "flash_attention_2": MistralFlashAttention2ForSVDKV,
-            "sdpa": MistralSdpaAttentionForSVDKV,
+            "eager": MistralAttentionForCSKV,
+            # "flash_attention_2": MistralFlashAttention2ForCSKV,
+            "sdpa": MistralSdpaAttentionForCSKV,
         }
         
         # replace attention modules
@@ -171,13 +171,13 @@ def get_svdkv_model(model, args):
     torch.cuda.empty_cache()
     return model
 
-def get_svdkv_model_train(model, args):
+def get_cskv_model_train(model, args):
 
     logging.debug(f"* Arguments: {args}")
     logging.info("Validating arguments ...")
     check_params(args)
     
-    logging.info(f"Getting svdkv model (train) for {args.model_id} ...")
+    logging.info(f"Getting cskv model (train) for {args.model_id} ...")
 
     if args.use_asvd:
         with open(os.path.join(args.asvd_calib_root, args.model_id, 'calib_input_distribution_abs_mean.pt'), 'rb') as f:
@@ -202,7 +202,7 @@ def get_svdkv_model_train(model, args):
         # replace attention modules
         for i in tqdm(range(len(model.model.layers))):
             block = model.model.layers[i]
-            new_attn = LlamaAttentionForSVDKVTrain(model.config, block.self_attn.layer_idx, args).to(block.self_attn.q_proj.weight.dtype).to(block.self_attn.q_proj.weight.device)
+            new_attn = LlamaAttentionForCSKVTrain(model.config, block.self_attn.layer_idx, args).to(block.self_attn.q_proj.weight.dtype).to(block.self_attn.q_proj.weight.device)
             new_attn_state_dict = block.self_attn.state_dict().copy()  # odict_keys(['q_proj.weight', 'k_proj.weight', 'v_proj.weight', 'o_proj.weight'])
             if args.use_asvd:
                 new_attn_state_dict['k_proj_a.weight'], new_attn_state_dict['k_proj_b.weight'] = init_asvd(new_attn_state_dict['k_proj.weight'], asvd_calib_data_all[i][0], compressed_dim_per_head=args.k_compressed_dim, num_heads=model.config.num_key_value_heads)
@@ -248,7 +248,7 @@ def get_svdkv_model_train(model, args):
         # replace attention modules
         for i in tqdm(range(len(model.model.layers))):
             block = model.model.layers[i]
-            new_attn = MistralAttentionForSVDKVTrain(model.config, block.self_attn.layer_idx, args).to(block.self_attn.q_proj.weight.dtype).to(block.self_attn.q_proj.weight.device)
+            new_attn = MistralAttentionForCSKVTrain(model.config, block.self_attn.layer_idx, args).to(block.self_attn.q_proj.weight.dtype).to(block.self_attn.q_proj.weight.device)
             new_attn_state_dict = block.self_attn.state_dict().copy()  # odict_keys(['q_proj.weight', 'k_proj.weight', 'v_proj.weight', 'o_proj.weight'])            
             if args.use_asvd:
                 new_attn_state_dict['k_proj_a.weight'], new_attn_state_dict['k_proj_b.weight'] = init_asvd(new_attn_state_dict['k_proj.weight'], asvd_calib_data_all[i][0], compressed_dim_per_head=args.k_compressed_dim, num_heads=model.config.num_key_value_heads)
