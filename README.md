@@ -15,13 +15,15 @@ Extensive experiments show that **CSKV** can reduce the memory overhead of the K
 Moreover, we show that our method can be seamlessly combined with quantization to further reduce the memory overhead, achieving a compression ratio of up to 95%.
 
 ## Setup
+Run the following commands to install required packages:
 ```bash
 conda create -n cskv python==3.9
 conda activate cskv
-
 pip install -e .
-pip install -r requirements.txt
 ```
+If you intend to use the flash-attention implementation, please install [flash_attn](https://github.com/Dao-AILab/flash-attention) according to the official guidance.
+
+In the following sections, we would use `longchat-7b-v1.5-32k` as an example to show the usage of this repo.
 
 ## Fine-tune
 First generate the required clibration statistics of ASVD: 

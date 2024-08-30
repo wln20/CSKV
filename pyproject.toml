@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cskv"
+version = "0.0.1"
+dependencies = [
+    'importlib-metadata; python_version<"3.10"',
+    'torch', 'torchvision', 'scikit-learn', 'sentencepiece',
+    'transformers==4.38.2', 'datasets', 'accelerate',
+    'protobuf'
+]
