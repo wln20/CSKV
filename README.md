@@ -1,7 +1,7 @@
 # CSKV: Training-Efficient Channel Shrinking for KV Cache in Long-Context Scenarios
 > *Luning Wang, Shiyao Li, Xuefei Ning, Zhihang Yuan, Shengen Yan, Guohao Dai, Yu Wang*
 
-<img src="assets/singular_values.png" alt="singular_values" width="310" /><img src="assets/workflow.png" alt="workflow" width="700" />
+<img src="assets/singular_values.png" alt="singular_values" width="250" /><img src="assets/workflow.png" alt="workflow" width="550" />
 
 ## Abstract [[paper]](https://arxiv.org/abs/2409.10593)
 
