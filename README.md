@@ -1,5 +1,8 @@
 # CSKV: Training-Efficient Channel Shrinking for KV Cache in Long-Context Scenarios
-## Abstract
+<img src="assets/singular_values.png" alt="singular_values" style="zoom: 50%;" /><img src="assets/workflow.png" alt="workflow" style="zoom: 50%;" />
+
+## Abstract [[paper]](https://arxiv.org/abs/2409.10593)
+
 Large Language Models (LLMs) have been widely adopted to process long-context tasks.
 However, the large memory overhead of the key-value (KV) cache poses significant challenges in long-context scenarios.
 Existing training-free KV cache compression methods typically focus on quantization and token pruning, which have compression limits, and excessive sparsity can lead to severe performance degradation.
@@ -14,7 +17,10 @@ Based on this observation, we propose using low-rank decomposition for key and v
 Extensive experiments show that **CSKV** can reduce the memory overhead of the KV cache by 80% while maintaining the model's long-context capability.
 Moreover, we show that our method can be seamlessly combined with quantization to further reduce the memory overhead, achieving a compression ratio of up to 95%.
 
+
+
 ## Setup
+
 Run the following commands to install required packages:
 ```bash
 conda create -n cskv python==3.9
