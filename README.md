@@ -39,10 +39,13 @@ First generate the required clibration statistics of ASVD:
 cd cskv_src/scripts
 python asvd_init_calib.py --model_path lmsys/longchat-7b-v1.5-32k --model_id longchat-7b-v1.5-32k 
 ```
-
+Main arguments:
+- `--model_path`: The path to the model checkpoints or model name on Huggingface.
+- `--model_id`: The name you give to the model, used for result saving.
+  
 The generated data would be saved in `../data/asvd_data/asvd_init_ckpts/{model_id}/` by default.
 
-Start fine-tuning:
+Then start fine-tuning:
 ```bash
 python train.py --model_path lmsys/longchat-7b-v1.5-32k \
 --model_id longchat-7b-v1.5-32k \
@@ -50,13 +53,27 @@ python train.py --model_path lmsys/longchat-7b-v1.5-32k \
 --v_density 0.5 \
 --use_asvd \
 --use_window \
+--q_window_size 32 \
 --k_bits 16 \
 --v_bits 16
 ```
-
+Main arguments:
+- `--model_path`: The path to the model checkpoints or model name on Huggingface.
+- `--model_id`: The name you give to the model, used for result saving. Note that it should be consistent with the one specified at the previous step to correctly retrieve the ASVD statistics.
+- `--k_density`: The proportion of key cache that is kept. For example, `k_density=0.4` means 60% of the original key cache is reduced.
+- `--v_density`: The proportion of value cache that is kept.
+- `--use_asvd`: Whether to use ASVD as the initialization method. If not specified, the script would use vanilla SVD to initialize by default.
+- `--use_window`: Whether to use window-based quantization (as in KIVI) when doing QAT. If not specified, the script would use per-token quantization for both keys and values. Note that in case of full precision (no quantization), this argument would have no impact on the tuning process.
+- `--q_window_size`: The window size used for window-based quantization. Default to be 32. Note that the input sequence would be automatically truncated to the multiple of `q_window_size` for QAT.
+- `--k_bits`: The bitwidth of the key cache. Default to be 16 (full precision).
+- `--v_bits`: The bitwidth of the value cache. Default to be 16 (full precision).
+  
 The checkpoint would be saved in `../data/kvcache_compressor_checkpoints/{model_id}/` by default.
 
+For more arguments like training hyperparams, please see the script for details.
+
 ## Inference with fine-tuned model
+Here we use the model with compressed KV cache to generate with the default prompt:
 ```bash
 python demo.py --model_path lmsys/longchat-7b-v1.5-32k \
 --model_id longchat-7b-v1.5-32k \
@@ -64,7 +81,24 @@ python demo.py --model_path lmsys/longchat-7b-v1.5-32k \
 --v_density 0.5 \
 --use_asvd \
 --use_window \
+--q_window_size 32 \
 --k_bits 16 \
 --v_bits 16
+```
+The meanings of most arguments are similar to those in the fine-tuning script. 
+
+Also, please note that we currently use simulated quantization in our script, for the algorithm-level evaluation of the method. So the observed reduction of memory overhead with this script should not reflect the thoretical outcome. We plan to do system-level optimizations in the future.
+
+## Citation
+```
+@misc{wang2024cskvtrainingefficientchannelshrinking,
+      title={CSKV: Training-Efficient Channel Shrinking for KV Cache in Long-Context Scenarios}, 
+      author={Luning Wang and Shiyao Li and Xuefei Ning and Zhihang Yuan and Shengen Yan and Guohao Dai and Yu Wang},
+      year={2024},
+      eprint={2409.10593},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2409.10593}, 
+}
 ```
 
